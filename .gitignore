@@ -1,0 +1,9 @@
+*.csv
+__pycache__
+*.pyc
+*.ipynb
+.vscode
+
+cached_audios
+input_test
+output_test
