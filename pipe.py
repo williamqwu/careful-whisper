@@ -289,7 +289,29 @@ def singlePipeline(input_file, cache_folder='cached_audios', audio_format='wav',
     }
     create_highlighted_html(transcribe_result, output_file_name, summary)
     
-# def batchPipeline()
+def batchPipeline(input_folder, cache_folder='cached_audios', audio_format='wav', model='base'):
+    try:
+        # Ensure the directory exists
+        if not os.path.exists(input_folder):
+            raise Exception(f"Directory '{input_folder}' does not exist.")
+
+        # Ensure the given path is a directory
+        if not os.path.isdir(input_folder):
+            raise Exception(f"'{input_folder}' is not a directory.")
+
+        # Iterate through the directory and list all files
+        file_names = []
+        for entry in os.listdir(input_folder):
+            entry_path = os.path.join(input_folder, entry)
+            if os.path.isfile(entry_path):
+                file_names.append(entry_path)
+
+    except Exception as e:
+        print(f"Error: {e}")
+        return
+    
+    for file_name in file_names:
+        singlePipeline(file_name,cache_folder=cache_folder,audio_format=audio_format,model=model)
 
 if __name__=='__main__':
-    singlePipeline('cached_audios/audio_20230416_154526.wav',model='medium')
+    batchPipeline('batch_test',model='medium')    

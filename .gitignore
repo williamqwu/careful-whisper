@@ -5,5 +5,4 @@ __pycache__
 .vscode
 
 cached_audios
-input_test
-output_test
+*_test
