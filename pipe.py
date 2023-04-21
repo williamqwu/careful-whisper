@@ -1,12 +1,14 @@
 # Env: conda activate whisper
 
 import ffmpeg
+import whisper
 import os
 import time
-import whisper
 import math
+
 import logging
 import colorlog
+import tqdm
 
 MODEL_LIST = ['tiny','base','small','medium','large']
 
@@ -108,7 +110,7 @@ def video_to_audio(video_file, audio_file, audio_format='wav'):
         input_stream = ffmpeg.input(video_file)
 
         # Create an output stream for the audio file with the specified format
-        output_stream = ffmpeg.output(input_stream, audio_file, format=audio_format, map='a')
+        output_stream = ffmpeg.output(input_stream, audio_file, format=audio_format, map='a', loglevel="quiet")
 
         # Run the FFmpeg command to perform the conversion
         ffmpeg.run(output_stream)
@@ -290,24 +292,25 @@ def create_highlighted_html(result, output_file, summary, sentence_per_par=15):
 
     with open(output_file, "w") as f:
         f.write(html_content)
+        logger.info(f"Result HTML file created as {output_file}.")
 
 def singlePipeline(input_file, cache_folder='cached_audios', audio_format='wav', model='base'):
-    logger.debug('entering single mode')
+    # logger.debug('entering single mode')
     cache_folder_path = os.path.join(get_script_directory(), cache_folder)
     if not os.path.exists(cache_folder_path):
         os.makedirs(cache_folder_path)
-        logger.warning(f"cached audio folder not existed. New cached folder created under {cache_folder_path}.")
+        logger.warning(f"Cached audio folder not existed. New cached folder created under {cache_folder_path}.")
     input_type = get_media_type(input_file)
 
     working_file = input_file
     if input_type == 'video':
         working_file = os.path.join(cache_folder_path, 'audio_'+get_time_as_string()+'.'+audio_format)
         video_to_audio(input_file, working_file, audio_format)
-        logger.info(f"video detected as input. Corresponding audio file converted as {working_file}.")
+        logger.info(f"Video detected as input. Corresponding audio file converted as {working_file}.")
     elif input_type == 'audio':
-        logger.info(f"audio detected as input. No furthur action needed.")
+        logger.info(f"Audio detected as input. No furthur action needed.")
     elif input_type == 'unknown':
-        logger.warning(f"input file type cannot be determined. File skipped.")
+        logger.warning(f"Input file type cannot be determined. File skipped.")
         raise TypeError("Input file type unknown.")
     
     raw_file_name = os.path.join(cache_folder_path, 'audio_'+get_time_as_string()+'_raw.json')
@@ -323,7 +326,7 @@ def singlePipeline(input_file, cache_folder='cached_audios', audio_format='wav',
     create_highlighted_html(transcribe_result, output_file_name, summary)
     
 def batchPipeline(input_folder, cache_folder='cached_audios', audio_format='wav', model='base'):
-    logger.debug('entering batch mode')
+    logger.debug('Entering batch mode')
     try:
         # Ensure the directory exists
         if not os.path.exists(input_folder):
@@ -344,8 +347,11 @@ def batchPipeline(input_folder, cache_folder='cached_audios', audio_format='wav'
         logger.error(f"{e}")
         return
 
-    for file_name in file_names:
+    cnt = 0
+    for file_name in tqdm(file_names):
         try:
+            cnt += 1
+            logger.info(f"Test file #{cnt} from batch: {file_name}")
             singlePipeline(file_name,cache_folder=cache_folder,audio_format=audio_format,model=model)
         except TypeError:
             continue
@@ -357,4 +363,4 @@ if __name__=='__main__':
     logger.info('Whisper pipeline starting')
     logger.info('=========================')
     batchPipeline('batch_test',model='medium')
-    logger.info('pipeline ends successfully\n')
+    logger.info('Pipeline ends successfully\n')
