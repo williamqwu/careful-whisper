@@ -5,8 +5,40 @@ import os
 import time
 import whisper
 import math
+import logging
+import colorlog
 
 MODEL_LIST = ['tiny','base','small','medium','large']
+
+def configure_logging():
+    # Set up logging configuration
+    logger = logging.getLogger()
+    logger.setLevel(logging.DEBUG)
+
+    # Create a file handler to write log messages to a file
+    file_handler = logging.FileHandler('whisper_pipe.log', mode='a')
+    file_handler.setLevel(logging.DEBUG)
+    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s',
+                                    datefmt='%Y-%m-%d %H:%M:%S')
+    file_handler.setFormatter(file_formatter)
+
+    # Create a stream handler to print log messages to the console
+    console_handler = logging.StreamHandler()
+    console_handler.setLevel(logging.DEBUG)
+    console_formatter = colorlog.ColoredFormatter(
+        '%(log_color)s%(levelname)s: %(message)s',
+        log_colors={
+            'DEBUG': 'cyan',
+            'INFO': 'green',
+            'WARNING': 'yellow',
+            'ERROR': 'red',
+            'CRITICAL': 'red,bg_white',
+        })
+    console_handler.setFormatter(console_formatter)
+
+    # Add handlers to the logger
+    logger.addHandler(file_handler)
+    logger.addHandler(console_handler)
 
 def get_time_as_string():
     timestr = time.strftime("%Y%m%d_%H%M%S")
@@ -25,7 +57,7 @@ def get_script_directory():
     except NameError:
         # __file__ attribute may not work as expected when the code is run interactively, 
         # such as in a REPL or a Jupyter Notebook.
-        print(f"Warning: __file__ attribute not working as expected. Using current working directory as an alternative.")
+        logger.warning(f"__file__ attribute not working as expected. Using current working directory as an alternative.")
         script_directory = os.getcwd()
     
     return script_directory
@@ -51,7 +83,7 @@ def get_media_type(file_path):
         else:
             return 'unknown'
     except ffmpeg.Error as e:
-        print(f"Error occurred while probing file: {e}")
+        logger.error(f"Error occurred while probing file: {e}")
         return 'unknown'
 
 def video_to_audio(video_file, audio_file, audio_format='wav'):
@@ -80,20 +112,20 @@ def video_to_audio(video_file, audio_file, audio_format='wav'):
 
         # Run the FFmpeg command to perform the conversion
         ffmpeg.run(output_stream)
-        print(f"Successfully converted {video_file} to {audio_file}")
+        logger.info(f"Successfully converted {video_file} to {audio_file}")
     except ffmpeg.Error as e:
-        print(f"Error occurred during conversion: {e}")
+        logger.warning(f"Error occurred during conversion: {e}")
 
 def transcribe_audio(working_file, model_name, log_file, write_log=True):
     t_start = time.process_time()
     model = whisper.load_model(model_name)
     result = model.transcribe(working_file)
     t_stop = time.process_time()
-    print(f"Transcribe finished. Elasped time: {(t_stop-t_start)}.")
+    logger.info(f"Transcribe finished. Elasped time: {(t_stop-t_start)}.")
     if write_log:
         with open(log_file, 'w') as f:
             f.write(str(result))
-        print(f"Result file created as {log_file}.")
+        logger.info(f"Result file created as {log_file}.")
     return result, (t_stop-t_start)
 
 def probability_to_rgb(prob):
@@ -260,21 +292,22 @@ def create_highlighted_html(result, output_file, summary, sentence_per_par=15):
         f.write(html_content)
 
 def singlePipeline(input_file, cache_folder='cached_audios', audio_format='wav', model='base'):
+    logger.debug('entering single mode')
     cache_folder_path = os.path.join(get_script_directory(), cache_folder)
     if not os.path.exists(cache_folder_path):
         os.makedirs(cache_folder_path)
-        print(f"Warning: cached audio folder not existed. New cached folder created under {cache_folder_path}.")
+        logger.warning(f"cached audio folder not existed. New cached folder created under {cache_folder_path}.")
     input_type = get_media_type(input_file)
 
     working_file = input_file
     if input_type == 'video':
         working_file = os.path.join(cache_folder_path, 'audio_'+get_time_as_string()+'.'+audio_format)
         video_to_audio(input_file, working_file, audio_format)
-        print(f"Video detected as input. Corresponding audio file converted as {working_file}.")
+        logger.info(f"video detected as input. Corresponding audio file converted as {working_file}.")
     elif input_type == 'audio':
-        print(f"Audio detected as input. No furthur action needed.")
+        logger.info(f"audio detected as input. No furthur action needed.")
     elif input_type == 'unknown':
-        print(f"Input file type cannot be determined. Action aborted.")
+        logger.warning(f"input file type cannot be determined. File skipped.")
         raise TypeError("Input file type unknown.")
     
     raw_file_name = os.path.join(cache_folder_path, 'audio_'+get_time_as_string()+'_raw.json')
@@ -290,6 +323,7 @@ def singlePipeline(input_file, cache_folder='cached_audios', audio_format='wav',
     create_highlighted_html(transcribe_result, output_file_name, summary)
     
 def batchPipeline(input_folder, cache_folder='cached_audios', audio_format='wav', model='base'):
+    logger.debug('entering batch mode')
     try:
         # Ensure the directory exists
         if not os.path.exists(input_folder):
@@ -307,11 +341,20 @@ def batchPipeline(input_folder, cache_folder='cached_audios', audio_format='wav'
                 file_names.append(entry_path)
 
     except Exception as e:
-        print(f"Error: {e}")
+        logger.error(f"{e}")
         return
-    
+
     for file_name in file_names:
-        singlePipeline(file_name,cache_folder=cache_folder,audio_format=audio_format,model=model)
+        try:
+            singlePipeline(file_name,cache_folder=cache_folder,audio_format=audio_format,model=model)
+        except TypeError:
+            continue
 
 if __name__=='__main__':
-    batchPipeline('batch_test',model='medium')    
+    configure_logging()
+
+    logger = logging.getLogger()
+    logger.info('Whisper pipeline starting')
+    logger.info('=========================')
+    batchPipeline('batch_test',model='medium')
+    logger.info('pipeline ends successfully\n')

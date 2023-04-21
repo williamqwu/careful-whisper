@@ -6,3 +6,4 @@ __pycache__
 
 cached_audios
 *_test
+whisper_pipe.log
