@@ -164,6 +164,6 @@ if __name__=='__main__':
     logger.info('Whisper pipeline starting')
     logger.info('=========================')
 
-    run_batch_pipeline('batch_test',model='tiny') # Enter your folder name here, or try `run_single_pipeline`
+    run_batch_pipeline('batch_test',model='medium') # Enter your folder name here, or try `run_single_pipeline`
 
     logger.info('Pipeline ends successfully\n')
