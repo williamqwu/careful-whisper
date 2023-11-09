@@ -3,6 +3,8 @@ A [whisper](https://github.com/openai/whisper)-based, lightweight transcription 
 
 To start up, install the dependencies from the file `requirements.txt`. You can run `python pipe.py` to start the pipeline after you modify your folder name and model preference in `pipe.py`.
 
+![demo_picture](assets/demo.jpg)
+
 ## Future Plan
 - [ ] Support configuring input, output, and model preference through argument parsing
 - [ ] Add a test program for demonstration
