@@ -1,9 +1,11 @@
-*.csv
+# general
 __pycache__
 *.pyc
-*.ipynb
 .vscode
+*.csv
+*test*
+*.log
 
+# subfolder
 cached_audios
-*_test
-whisper_pipe.log
+output

@@ -4,29 +4,30 @@ import ffmpeg
 import whisper
 import os
 import time
-import math
 
 import logging
 import colorlog
-import tqdm
+from tqdm import tqdm
+import util_html
+import util_general
 
 MODEL_LIST = ['tiny','base','small','medium','large']
 
-def configure_logging():
+def configure_logging(log_file='whisper_pipe.log'):
     # Set up logging configuration
     logger = logging.getLogger()
-    logger.setLevel(logging.DEBUG)
+    logger.setLevel(logging.INFO)
 
     # Create a file handler to write log messages to a file
-    file_handler = logging.FileHandler('whisper_pipe.log', mode='a')
-    file_handler.setLevel(logging.DEBUG)
+    file_handler = logging.FileHandler(log_file, mode='a')
+    file_handler.setLevel(logging.INFO)
     file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s',
                                     datefmt='%Y-%m-%d %H:%M:%S')
     file_handler.setFormatter(file_formatter)
 
     # Create a stream handler to print log messages to the console
     console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.DEBUG)
+    console_handler.setLevel(logging.INFO)
     console_formatter = colorlog.ColoredFormatter(
         '%(log_color)s%(levelname)s: %(message)s',
         log_colors={
@@ -49,9 +50,6 @@ def get_time_as_string():
 def get_script_directory():
     """
     Get the directory of the script that runs this function.
-
-    Returns:
-        str: The directory of the script that runs this function.
     """
     try:
         script_path = os.path.abspath(__file__)
@@ -59,50 +57,16 @@ def get_script_directory():
     except NameError:
         # __file__ attribute may not work as expected when the code is run interactively, 
         # such as in a REPL or a Jupyter Notebook.
-        logger.warning(f"__file__ attribute not working as expected. Using current working directory as an alternative.")
+        logger.warning(f"__file__ attribute not working as expected. Using current working directory as an alternative. Script path: {script_path}.")
         script_directory = os.getcwd()
     
     return script_directory
-
-def get_media_type(file_path):
-    try:
-        # Probe the file to get its metadata
-        probe = ffmpeg.probe(file_path)
-
-        # Check the streams to determine the media type
-        has_audio, has_video = False, False
-        for stream in probe['streams']:
-            if stream['codec_type'] == 'audio':
-                has_audio = True
-            elif stream['codec_type'] == 'video':
-                has_video = True
-
-        # Determine the media type based on the streams
-        if has_audio and has_video:
-            return 'video'
-        elif has_audio:
-            return 'audio'
-        else:
-            return 'unknown'
-    except ffmpeg.Error as e:
-        logger.error(f"Error occurred while probing file: {e}")
-        return 'unknown'
 
 def video_to_audio(video_file, audio_file, audio_format='wav'):
     """
     Convert a video file to an audio file using FFmpeg.
 
-    Args:
-        video_file (str): The path to the input video file.
-        audio_file (str): The path to the output audio file.
-        audio_format (str): The format of the output audio file. Defaults to 'mp3'.
-
-    Example usage:
-        video_file = 'example_video.mp4'
-        audio_file = 'example_audio.mp3'
-        video_to_audio(video_file, audio_file)
-
-    Note:
+    NOTE:
         Specify audio_format='mp3' to save disk usage with lower accuracy.
     """
     try:
@@ -130,181 +94,21 @@ def transcribe_audio(working_file, model_name, log_file, write_log=True):
         logger.info(f"Result file created as {log_file}.")
     return result, (t_stop-t_start)
 
-def probability_to_rgb(prob):
-    """
-    Convert log_prob to RGB color tuple with green yellow red color scale
-    Example usage:
-        probability = 0.3  # Change this value to test other probabilities
-        rgb = probability_to_rgb(probability)
-        print("RGB value:", rgb)
-
-    NOTE: 
-        in source code, the default logprob_threshold is -1.0 which means that any inference with prob. 
-        lower than ~0.368 will be considered as failure.
-        this feature is defined in line 399 of https://github.com/openai/whisper/blob/main/whisper/transcribe.py
-    """
-    if prob < 0.0 or prob > 1.0:
-        raise ValueError("Probability must be between 0.0 and 1.0")
-
-    if prob <= 0.5:
-        r = 255
-        g = int(255 * (prob * 2))
-    else:
-        r = int(255 * (2 - prob * 2))
-        g = 255
-
-    b = 0
-
-    return (r, g, b)
-
-def create_highlighted_html(result, output_file, summary, sentence_per_par=15):
-
-    html_template_min = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Highlighted Sentences</title>
-        <style>
-            body {{
-                font-family: Arial, sans-serif;
-                line-height: 1.5
-            }}
-            .highlighted {{
-                display: inline;
-                padding: 2px 5px;
-                margin: 0;
-            }}
-        </style>
-    </head>
-    <body>
-        <p>{}</p>
-    </body>
-    </html>
-    """
-
-    html_template = """
-    <!DOCTYPE html>
-    <html lang="en">
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>Audio Transcription</title>
-        <style>
-            body {{
-                font-family: Arial, sans-serif;
-                line-height: 1.5;
-                margin: 0;
-                padding: 0;
-                background-color: #f0f0f0;
-            }}
-
-            header {{
-                background-color: #333;
-                color: #fff;
-                padding: 1rem;
-                font-size: 1.5rem;
-                font-weight: bold;
-                text-align: center;
-            }}
-
-            .info-container {{
-                max-width: 800px;
-                margin: 1rem auto;
-                padding: 1rem;
-                background-color: #fff;
-                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-            }}
-
-            .info-container h1 {{
-                font-size: 2rem;
-                font-weight: bold;
-                margin-bottom: 1rem;
-            }}
-
-            .info-container ul {{
-                list-style: none;
-                padding: 0;
-            }}
-
-            .info-container ul li {{
-                margin-bottom: 0.5rem;
-                font-size: 1.1rem;
-            }}
-
-            .content-container p {{
-                max-width: 800px;
-                margin: 1rem auto;
-                padding: 1rem;
-                background-color: #fff;
-                box-shadow: 0 2px 4px rgba(0, 0, 0, 0.1);
-                white-space: pre-wrap;
-                word-wrap: break-word;
-            }}
-        </style>
-    </head>
-    <body>
-        <header>
-            Audio Transcription
-        </header>
-        <section class="info-container">
-            <ul>
-                <li>File: {title}</li>
-                <li>Generated Date: {created_date}</li>
-                <li>Model: {model_name}</li>
-                <li>Elapsed Time: {elapsed_time}</li>
-            </ul>
-        </section>
-        <section class="content-container">
-            <p>{content}</p>
-        </section>
-    </body>
-    </html>
-    """
-
-    sentences = []
-    rgb_colors = []
-
-    for i in result['segments']:
-        sentences.append(i['text'])
-        rgb_colors.append(probability_to_rgb(math.exp(i['avg_logprob'])))
-
-    if len(sentences) != len(rgb_colors):
-        raise ValueError("The number of sentences must match the number of RGB colors.")
-
-    highlighted_sentences = []
-    cnt = 0
-    for sentence, color in zip(sentences, rgb_colors):
-        cnt += 1
-        rgb_str = "rgb({}, {}, {})".format(*color)
-        highlighted_sentence = '<span class="highlighted" style="background-color: {}">{}</span>'.format(rgb_str, sentence)
-        highlighted_sentences.append(highlighted_sentence)
-        if cnt==sentence_per_par:
-            highlighted_sentences.append('<br><br>')
-        cnt %= sentence_per_par
-
-    # html_content = html_template.format(" ".join(highlighted_sentences))
-    
-    file_data = summary
-    file_data["content"] = " ".join(highlighted_sentences)
-    html_content = html_template.format(**file_data)
-
-    with open(output_file, "w") as f:
-        f.write(html_content)
-        logger.info(f"Result HTML file created as {output_file}.")
-
-def singlePipeline(input_file, cache_folder='cached_audios', audio_format='wav', model='base'):
-    # logger.debug('entering single mode')
+def run_single_pipeline(input_file, output_folder='output', cache_folder='cached_audios', audio_format='wav', model='base'):
     cache_folder_path = os.path.join(get_script_directory(), cache_folder)
+    output_folder_path = os.path.join(get_script_directory(), output_folder)
     if not os.path.exists(cache_folder_path):
         os.makedirs(cache_folder_path)
         logger.warning(f"Cached audio folder not existed. New cached folder created under {cache_folder_path}.")
-    input_type = get_media_type(input_file)
+    if not os.path.exists(output_folder_path):
+        os.makedirs(output_folder_path)
+        logger.warning(f"Output folder not existed. New cached folder created under {output_folder_path}.")
+    input_type = util_general.get_media_type(input_file)
+    input_file_name = os.path.basename(input_file).replace('.', '_')
 
     working_file = input_file
     if input_type == 'video':
-        working_file = os.path.join(cache_folder_path, 'audio_'+get_time_as_string()+'.'+audio_format)
+        working_file = os.path.join(cache_folder_path, input_file_name+'_audio.'+audio_format)
         video_to_audio(input_file, working_file, audio_format)
         logger.info(f"Video detected as input. Corresponding audio file converted as {working_file}.")
     elif input_type == 'audio':
@@ -313,19 +117,19 @@ def singlePipeline(input_file, cache_folder='cached_audios', audio_format='wav',
         logger.warning(f"Input file type cannot be determined. File skipped.")
         raise TypeError("Input file type unknown.")
     
-    raw_file_name = os.path.join(cache_folder_path, 'audio_'+get_time_as_string()+'_raw.json')
+    raw_file_name = os.path.join(cache_folder_path, input_file_name+'_raw.json')
     transcribe_result, elapsed_time = transcribe_audio(working_file, model, raw_file_name)
     
-    output_file_name = os.path.join(cache_folder_path, 'audio_'+get_time_as_string()+'_output.html')
+    output_file_name = os.path.join(output_folder_path, input_file_name+'_output.html')
     summary = {
-        "title": working_file,
+        "title": input_file_name,
         "model_name": model,
         "elapsed_time": "{0:.2f} sec".format(elapsed_time),
         "created_date": get_time_as_string()
     }
-    create_highlighted_html(transcribe_result, output_file_name, summary)
+    util_html.create_highlighted_html(transcribe_result, output_file_name, summary)
     
-def batchPipeline(input_folder, cache_folder='cached_audios', audio_format='wav', model='base'):
+def run_batch_pipeline(input_folder, output_folder='output', cache_folder='cached_audios', audio_format='wav', model='base'):
     logger.debug('Entering batch mode')
     try:
         # Ensure the directory exists
@@ -347,20 +151,19 @@ def batchPipeline(input_folder, cache_folder='cached_audios', audio_format='wav'
         logger.error(f"{e}")
         return
 
-    cnt = 0
-    for file_name in tqdm(file_names):
+    for idx, file_name in enumerate(tqdm(file_names, desc='Processing')):
         try:
-            cnt += 1
-            logger.info(f"Test file #{cnt} from batch: {file_name}")
-            singlePipeline(file_name,cache_folder=cache_folder,audio_format=audio_format,model=model)
+            logger.info(f"Testing file #{idx+1}/{len(file_names)} from batch: {file_name}")
+            run_single_pipeline(file_name,output_folder=output_folder,cache_folder=cache_folder,audio_format=audio_format,model=model)
         except TypeError:
             continue
 
 if __name__=='__main__':
     configure_logging()
-
     logger = logging.getLogger()
     logger.info('Whisper pipeline starting')
     logger.info('=========================')
-    batchPipeline('batch_test',model='medium')
+
+    run_batch_pipeline('batch_test',model='tiny') # Enter your folder name here, or try `run_single_pipeline`
+
     logger.info('Pipeline ends successfully\n')
