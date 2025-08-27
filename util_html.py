@@ -6,6 +6,7 @@ from string import Template
 
 try:
     import pysbd  # best-quality sentence boundary detection
+
     _PYSBD = True
 except Exception:
     _PYSBD = False
@@ -86,7 +87,8 @@ HTML_TEMPLATE = """
 </html>
 """
 
-def probability_to_rgb(prob: float) -> Tuple[int,int,int]:
+
+def probability_to_rgb(prob: float) -> Tuple[int, int, int]:
     """Map probability in [0,1] to red→yellow→green ramp."""
     if prob < 0.0 or prob > 1.0:
         raise ValueError("Probability must be between 0 and 1.")
@@ -96,7 +98,9 @@ def probability_to_rgb(prob: float) -> Tuple[int,int,int]:
         r, g = int(255 * (2 - prob * 2)), 255
     return (r, g, 0)
 
+
 # --- sentence tokenization helpers ---
+
 
 def _tokenize_sentences(text: str) -> List[str]:
     text = re.sub(r"\s+", " ", text).strip()
@@ -113,7 +117,7 @@ def _tokenize_sentences(text: str) -> List[str]:
         if re.search(r"[.?!…][\"\')]?$", tok.strip()):
             # check last word isn't an abbreviation
             last = re.sub(r"[^A-Za-z\.\']+", "", tok)
-            if re.fullmatch(fr"{abbrev}\.", last):
+            if re.fullmatch(rf"{abbrev}\.", last):
                 continue
             pieces.append("".join(buf).strip())
             buf = []
@@ -121,14 +125,16 @@ def _tokenize_sentences(text: str) -> List[str]:
         pieces.append("".join(buf).strip())
     return pieces
 
+
 @dataclass
 class Piece:
     text: str
-    prob: float       # probability in [0,1]
-    start_t: float    # segment start
-    end_t: float      # segment end
+    prob: float  # probability in [0,1]
+    start_t: float  # segment start
+    end_t: float  # segment end
     start_i: int = 0  # char offsets in concatenated string (filled later)
     end_i: int = 0
+
 
 def _concat_pieces(segments) -> Tuple[str, List[Piece], List[int]]:
     """
@@ -148,8 +154,12 @@ def _concat_pieces(segments) -> Tuple[str, List[Piece], List[int]]:
             prev_end = seg.get("end", prev_end)
             continue
         prob = math.exp(seg.get("avg_logprob", -1.0))  # convert log prob → prob
-        p = Piece(text=txt, prob=max(0.0, min(1.0, prob)),
-                  start_t=seg.get("start", 0.0), end_t=seg.get("end", 0.0))
+        p = Piece(
+            text=txt,
+            prob=max(0.0, min(1.0, prob)),
+            start_t=seg.get("start", 0.0),
+            end_t=seg.get("end", 0.0),
+        )
         # long pause between segments → suggest a break
         if prev_end is not None:
             gap = max(0.0, p.start_t - prev_end)
@@ -167,6 +177,7 @@ def _concat_pieces(segments) -> Tuple[str, List[Piece], List[int]]:
         prev_end = p.end_t
     return "".join(s), pieces, break_offsets
 
+
 def _char_weighted_prob(span_start: int, span_end: int, pieces: List[Piece]) -> float:
     """Average probability over pieces overlapped by [span_start, span_end)."""
     total, wsum = 0.0, 0
@@ -181,7 +192,8 @@ def _char_weighted_prob(span_start: int, span_end: int, pieces: List[Piece]) -> 
             break
     return (total / wsum) if wsum else 0.5  # neutral if unknown
 
-def _sentences_with_spans(text: str) -> List[Tuple[int,int,str]]:
+
+def _sentences_with_spans(text: str) -> List[Tuple[int, int, str]]:
     """Tokenize into sentences and recover their char spans via greedy search."""
     sents = _tokenize_sentences(text)
     spans = []
@@ -196,8 +208,12 @@ def _sentences_with_spans(text: str) -> List[Tuple[int,int,str]]:
         pos = j
     return spans
 
-def _paragraphize(sent_spans: List[Tuple[int,int,str]], break_offsets: List[int],
-                  target_chars: int = 500) -> List[List[Tuple[int,int,str]]]:
+
+def _paragraphize(
+    sent_spans: List[Tuple[int, int, str]],
+    break_offsets: List[int],
+    target_chars: int = 500,
+) -> List[List[Tuple[int, int, str]]]:
     """Group sentences into paragraphs using (a) long-pause hints and (b) size budget."""
     breaks = set(break_offsets)
     paras, cur, cur_chars = [], [], 0
@@ -209,9 +225,9 @@ def _paragraphize(sent_spans: List[Tuple[int,int,str]], break_offsets: List[int]
         return any(b <= upto_idx for b in breaks)
 
     last_break_index = -1
-    for (i, j, s) in sent_spans:
+    for i, j, s in sent_spans:
         cur.append((i, j, s))
-        cur_chars += (j - i)
+        cur_chars += j - i
         # break if we just crossed a long-pause boundary or exceeded size
         crossed_long_pause = False
         for b in breaks:
@@ -226,8 +242,14 @@ def _paragraphize(sent_spans: List[Tuple[int,int,str]], break_offsets: List[int]
         paras.append(cur)
     return paras
 
-def create_highlighted_html(result, output_file, summary, sentence_per_par: int = 15,
-                            audio_src: Optional[str] = None):
+
+def create_highlighted_html(
+    result,
+    output_file,
+    summary,
+    sentence_per_par: int = 15,
+    audio_src: Optional[str] = None,
+):
     """
     Build readable HTML:
       - real sentence boundaries (pysbd if available)
@@ -243,19 +265,23 @@ def create_highlighted_html(result, output_file, summary, sentence_per_par: int 
     html_paragraphs = []
     for para in paras:
         chunks = []
-        for (i, j, s) in para:
+        for i, j, s in para:
             prob = _char_weighted_prob(i, j, pieces)
             r, g, b = probability_to_rgb(prob)
-            chunks.append(f'<span class="sen" style="background-color: rgb({r},{g},{b})">{s}</span>')
+            chunks.append(
+                f'<span class="sen" style="background-color: rgb({r},{g},{b})">{s}</span>'
+            )
         html_paragraphs.append("<p>" + " ".join(chunks) + "</p>")
 
     audio_block = ""
     if audio_src:
         # simple embedded audio; the sentences are not time-synced, but this is handy
-        audio_block = f'<div class="audio"><audio controls src="{audio_src}"></audio></div>'
+        audio_block = (
+            f'<div class="audio"><audio controls src="{audio_src}"></audio></div>'
+        )
 
     file_data = dict(summary)
-    file_data.setdefault("audio_block", "")          # ensure key exists
+    file_data.setdefault("audio_block", "")  # ensure key exists
     file_data["content"] = "\n".join(html_paragraphs)
 
     html = Template(HTML_TEMPLATE).safe_substitute(file_data)
