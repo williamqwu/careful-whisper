@@ -2,3 +2,4 @@ openai-whisper
 ffmpeg-python
 colorlog
 tqdm
+pysbd

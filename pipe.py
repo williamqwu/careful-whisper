@@ -5,6 +5,8 @@ import whisper
 import os
 import time
 
+import json
+from pathlib import Path
 import logging
 import colorlog
 from tqdm import tqdm
@@ -17,7 +19,11 @@ def configure_logging(log_file='whisper_pipe.log'):
     # Set up logging configuration
     logger = logging.getLogger()
     logger.setLevel(logging.INFO)
-
+    # prevent duplicate handlers
+    if logger.handlers:
+        for h in list(logger.handlers):
+            logger.removeHandler(h)
+            h.close()
     # Create a file handler to write log messages to a file
     file_handler = logging.FileHandler(log_file, mode='a')
     file_handler.setLevel(logging.INFO)
@@ -53,15 +59,13 @@ def get_script_directory():
     """
     try:
         script_path = os.path.abspath(__file__)
-        script_directory = os.path.dirname(script_path)
+        return os.path.dirname(script_path)
     except NameError:
         # __file__ attribute may not work as expected when the code is run interactively, 
         # such as in a REPL or a Jupyter Notebook.
         logger.warning(f"__file__ attribute not working as expected. Using current working directory as an alternative. Script path: {script_path}.")
-        script_directory = os.getcwd()
+        return os.getcwd()
     
-    return script_directory
-
 def video_to_audio(video_file, audio_file, audio_format='wav'):
     """
     Convert a video file to an audio file using FFmpeg.
@@ -70,64 +74,66 @@ def video_to_audio(video_file, audio_file, audio_format='wav'):
         Specify audio_format='mp3' to save disk usage with lower accuracy.
     """
     try:
-        # Create an input stream from the video file
-        input_stream = ffmpeg.input(video_file)
-
-        # Create an output stream for the audio file with the specified format
-        output_stream = ffmpeg.output(input_stream, audio_file, format=audio_format, map='a', loglevel="quiet")
-
-        # Run the FFmpeg command to perform the conversion
-        ffmpeg.run(output_stream)
+        stream = ffmpeg.input(video_file)
+        out = ffmpeg.output(stream, audio_file, format=audio_format, map='a', loglevel="quiet")
+        out = ffmpeg.overwrite_output(out)
+        ffmpeg.run(out)
         logger.info(f"Successfully converted {video_file} to {audio_file}")
     except ffmpeg.Error as e:
-        logger.warning(f"Error occurred during conversion: {e}")
+        logger.warning(f"Error during conversion: {e}")
 
-def transcribe_audio(working_file, model_name, log_file, write_log=True):
-    t_start = time.process_time()
+def transcribe_audio(working_file, model_name, log_file, write_log=True, 
+                     word_timestamps=False, language=None):
+    t0 = time.perf_counter()
     model = whisper.load_model(model_name)
-    result = model.transcribe(working_file)
-    t_stop = time.process_time()
-    logger.info(f"Transcribe finished. Elasped time: {(t_stop-t_start)}.")
+    result = model.transcribe(
+        working_file,
+        word_timestamps=word_timestamps,  # set True if you want finer pauses
+        condition_on_previous_text=False,
+        temperature=0.0,
+        language=language,  # None = auto
+    )
+    dt = time.perf_counter() - t0
+    logger.info(f"Transcribe finished. Elapsed time: {dt:.2f}s.")
     if write_log:
-        with open(log_file, 'w') as f:
-            f.write(str(result))
-        logger.info(f"Result file created as {log_file}.")
-    return result, (t_stop-t_start)
+        with open(log_file, 'w', encoding='utf-8') as f:
+            json.dump(result, f, ensure_ascii=False, indent=2)
+        logger.info(f"Wrote JSON to {log_file}.")
+    return result, dt
 
-def run_single_pipeline(input_file, output_folder='output', cache_folder='cached_audios', audio_format='wav', model='base'):
-    cache_folder_path = os.path.join(get_script_directory(), cache_folder)
-    output_folder_path = os.path.join(get_script_directory(), output_folder)
-    if not os.path.exists(cache_folder_path):
-        os.makedirs(cache_folder_path)
-        logger.warning(f"Cached audio folder not existed. New cached folder created under {cache_folder_path}.")
-    if not os.path.exists(output_folder_path):
-        os.makedirs(output_folder_path)
-        logger.warning(f"Output folder not existed. New cached folder created under {output_folder_path}.")
+def run_single_pipeline(input_file, output_folder='output', cache_folder='cached_audios', 
+                        audio_format='wav', model='base'):
+    base = Path(get_script_directory())
+    cache_folder_path = base / cache_folder
+    output_folder_path = base / output_folder
+    cache_folder_path.mkdir(parents=True, exist_ok=True)
+    output_folder_path.mkdir(parents=True, exist_ok=True)
+
     input_type = util_general.get_media_type(input_file)
-    input_file_name = os.path.basename(input_file).replace('.', '_')
+    stem = Path(input_file).name
+    stem = Path(stem).stem  # remove one extension safely
 
     working_file = input_file
     if input_type == 'video':
-        working_file = os.path.join(cache_folder_path, input_file_name+'_audio.'+audio_format)
+        working_file = str(cache_folder_path / f"{stem}_audio.{audio_format}")
         video_to_audio(input_file, working_file, audio_format)
-        logger.info(f"Video detected as input. Corresponding audio file converted as {working_file}.")
+        logger.info(f"Converted video to audio: {working_file}")
     elif input_type == 'audio':
-        logger.info(f"Audio detected as input. No furthur action needed.")
-    elif input_type == 'unknown':
-        logger.warning(f"Input file type cannot be determined. File skipped.")
+        logger.info("Audio detected as input.")
+    else:
         raise TypeError("Input file type unknown.")
-    
-    raw_file_name = os.path.join(cache_folder_path, input_file_name+'_raw.json')
-    transcribe_result, elapsed_time = transcribe_audio(working_file, model, raw_file_name)
-    
-    output_file_name = os.path.join(output_folder_path, input_file_name+'_output.html')
+
+    raw_file_name = str(cache_folder_path / f"{stem}_raw.json")
+    result, elapsed_time = transcribe_audio(working_file, model, raw_file_name, word_timestamps=False)
+
+    output_file_name = str(output_folder_path / f"{stem}_output.html")
     summary = {
-        "title": input_file_name,
+        "title": stem,
         "model_name": model,
-        "elapsed_time": "{0:.2f} sec".format(elapsed_time),
+        "elapsed_time": f"{elapsed_time:.2f} sec",
         "created_date": get_time_as_string()
     }
-    util_html.create_highlighted_html(transcribe_result, output_file_name, summary)
+    util_html.create_highlighted_html(result, output_file_name, summary, audio_src=working_file)
     
 def run_batch_pipeline(input_folder, output_folder='output', cache_folder='cached_audios', audio_format='wav', model='base'):
     logger.debug('Entering batch mode')
@@ -164,6 +170,7 @@ if __name__=='__main__':
     logger.info('Whisper pipeline starting')
     logger.info('=========================')
 
-    run_batch_pipeline('batch_test',model='medium') # Enter your folder name here, or try `run_single_pipeline`
+    # run_batch_pipeline('batch_test',model='medium') # Enter your folder name here, or try `run_single_pipeline`
+    run_single_pipeline('input_test/intro_29s.wav', model='medium', audio_format='mp3')
 
     logger.info('Pipeline ends successfully\n')
