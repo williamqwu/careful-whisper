@@ -5,7 +5,8 @@ __pycache__
 *.csv
 *test*
 *.log
+.old
 
 # subfolder
-cached_audios
-output
+data
+artifacts

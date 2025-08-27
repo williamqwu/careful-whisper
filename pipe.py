@@ -1,176 +1,347 @@
-# Env: conda activate whisper
+from __future__ import annotations
+
+import time
+import json
+import logging
+from pathlib import Path
+from contextlib import contextmanager
+import tempfile
+from typing import Iterator, Optional, Iterable
 
 import ffmpeg
 import whisper
-import os
-import time
-
-import json
-from pathlib import Path
-import logging
 import colorlog
 from tqdm import tqdm
+
 import util_html
 import util_general
 
-MODEL_LIST = ['tiny','base','small','medium','large']
+MODEL_LIST = ["tiny", "base", "small", "medium", "large", "turbo"]
+# for supported language, see
+#   https://github.com/openai/whisper/blob/main/whisper/tokenizer.py
 
-def configure_logging(log_file='whisper_pipe.log'):
-    # Set up logging configuration
+# ------------------------------ Logging ---------------------------------
+
+
+def configure_logging(
+    log_dir: Path = Path("artifacts/logs"),
+    log_file: str = "whisper.log",
+    level: int = logging.INFO,
+) -> None:
+    """
+    Create a console + file logger with no duplicate handlers.
+    """
+    log_dir.mkdir(parents=True, exist_ok=True)
     logger = logging.getLogger()
-    logger.setLevel(logging.INFO)
-    # prevent duplicate handlers
-    if logger.handlers:
-        for h in list(logger.handlers):
-            logger.removeHandler(h)
+    logger.setLevel(level)
+
+    # remove old handlers (avoid duplicates when re-running)
+    for h in list(logger.handlers):
+        logger.removeHandler(h)
+        try:
             h.close()
-    # Create a file handler to write log messages to a file
-    file_handler = logging.FileHandler(log_file, mode='a')
-    file_handler.setLevel(logging.INFO)
-    file_formatter = logging.Formatter('%(asctime)s - %(levelname)s - %(message)s',
-                                    datefmt='%Y-%m-%d %H:%M:%S')
-    file_handler.setFormatter(file_formatter)
+        except Exception:
+            pass
 
-    # Create a stream handler to print log messages to the console
-    console_handler = logging.StreamHandler()
-    console_handler.setLevel(logging.INFO)
-    console_formatter = colorlog.ColoredFormatter(
-        '%(log_color)s%(levelname)s: %(message)s',
-        log_colors={
-            'DEBUG': 'cyan',
-            'INFO': 'green',
-            'WARNING': 'yellow',
-            'ERROR': 'red',
-            'CRITICAL': 'red,bg_white',
-        })
-    console_handler.setFormatter(console_formatter)
+    # file handler
+    fh = logging.FileHandler(log_dir / log_file, mode="a", encoding="utf-8")
+    fh.setLevel(level)
+    fh.setFormatter(
+        logging.Formatter(
+            "%(asctime)s - %(levelname)s - %(message)s",
+            datefmt="%Y-%m-%d %H:%M:%S",
+        )
+    )
 
-    # Add handlers to the logger
-    logger.addHandler(file_handler)
-    logger.addHandler(console_handler)
+    # console handler (colored)
+    ch = logging.StreamHandler()
+    ch.setLevel(level)
+    ch.setFormatter(
+        colorlog.ColoredFormatter(
+            "%(log_color)s%(levelname)s: %(message)s",
+            log_colors={
+                "DEBUG": "cyan",
+                "INFO": "green",
+                "WARNING": "yellow",
+                "ERROR": "red",
+                "CRITICAL": "red,bg_white",
+            },
+        )
+    )
 
-def get_time_as_string():
-    timestr = time.strftime("%Y%m%d_%H%M%S")
-    return timestr
+    logger.addHandler(fh)
+    logger.addHandler(ch)
 
-def get_script_directory():
-    """
-    Get the directory of the script that runs this function.
-    """
+
+logger = logging.getLogger(__name__)
+
+# ------------------------------ Helpers ---------------------------------
+
+
+def now_tag() -> str:
+    return time.strftime("%Y%m%d_%H%M%S")
+
+
+def script_dir() -> Path:
     try:
-        script_path = os.path.abspath(__file__)
-        return os.path.dirname(script_path)
+        return Path(__file__).resolve().parent
     except NameError:
-        # __file__ attribute may not work as expected when the code is run interactively, 
-        # such as in a REPL or a Jupyter Notebook.
-        logger.warning(f"__file__ attribute not working as expected. Using current working directory as an alternative. Script path: {script_path}.")
-        return os.getcwd()
-    
-def video_to_audio(video_file, audio_file, audio_format='wav'):
-    """
-    Convert a video file to an audio file using FFmpeg.
+        return Path.cwd()
 
-    NOTE:
-        Specify audio_format='mp3' to save disk usage with lower accuracy.
+
+def safe_stem(p: Path) -> str:
+    # handles names like "foo.bar.mp4" --> "foo.bar"
+    return p.name[: -(len(p.suffix))] if p.suffix else p.name
+
+
+# -------------------------- Media Conversion ----------------------------
+
+
+@contextmanager
+def as_audio(
+    path: Path,
+    audio_format: str = "wav",
+    keep_intermediate: bool = False,
+    tmp_dir: Optional[Path] = None,
+) -> Iterator[Path]:
     """
+    Yield an audio file path for either an audio input (original file)
+    or a video input (converted on-the-fly into a temp file).
+
+    By default, temp audio is NOT persisted. Set keep_intermediate=True to keep it.
+    """
+    media_type = util_general.get_media_type(str(path))
+    if media_type == "audio":
+        yield path
+        return
+    if media_type != "video":
+        raise TypeError(f"Unsupported media type for '{path}'")
+
+    tmp_dir = tmp_dir or Path(tempfile.gettempdir())
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    # use NamedTemporaryFile but close it first (Windows-friendly)
+    with tempfile.NamedTemporaryFile(
+        prefix="whisper_", suffix=f".{audio_format}", dir=tmp_dir, delete=False
+    ) as ntf:
+        tmp_audio = Path(ntf.name)
+
     try:
-        stream = ffmpeg.input(video_file)
-        out = ffmpeg.output(stream, audio_file, format=audio_format, map='a', loglevel="quiet")
+        stream = ffmpeg.input(str(path))
+        out = ffmpeg.output(
+            stream, str(tmp_audio), format=audio_format, map="a", loglevel="quiet"
+        )
         out = ffmpeg.overwrite_output(out)
         ffmpeg.run(out)
-        logger.info(f"Successfully converted {video_file} to {audio_file}")
-    except ffmpeg.Error as e:
-        logger.warning(f"Error during conversion: {e}")
+        logger.info(f"Converted video --> audio (temp): {tmp_audio}")
+        yield tmp_audio
+    finally:
+        if tmp_audio.exists() and not keep_intermediate:
+            try:
+                tmp_audio.unlink()
+                logger.debug(f"Deleted temp audio: {tmp_audio}")
+            except Exception as e:
+                logger.warning(f"Failed to delete temp audio {tmp_audio}: {e}")
 
-def transcribe_audio(working_file, model_name, log_file, write_log=True, 
-                     word_timestamps=False, language=None):
+
+# ----------------------------- Transcribe -------------------------------
+
+
+def transcribe_audio(
+    audio_file: Path,
+    model_name: str,
+    dump_json_to: Optional[Path] = None,
+    word_timestamps: bool = False,
+    language: Optional[str] = None,
+) -> tuple[dict, float]:
+    """
+    Transcribe audio with Whisper and optionally dump the raw JSON.
+    Returns (result_json, elapsed_seconds).
+    """
     t0 = time.perf_counter()
     model = whisper.load_model(model_name)
     result = model.transcribe(
-        working_file,
-        word_timestamps=word_timestamps,  # set True if you want finer pauses
+        str(audio_file),
+        word_timestamps=word_timestamps,
         condition_on_previous_text=False,
         temperature=0.0,
         language=language,  # None = auto
     )
     dt = time.perf_counter() - t0
-    logger.info(f"Transcribe finished. Elapsed time: {dt:.2f}s.")
-    if write_log:
-        with open(log_file, 'w', encoding='utf-8') as f:
+    logger.info(f"Transcription finished in {dt:.2f}s (model={model_name}).")
+
+    if dump_json_to:
+        dump_json_to.parent.mkdir(parents=True, exist_ok=True)
+        with open(dump_json_to, "w", encoding="utf-8") as f:
             json.dump(result, f, ensure_ascii=False, indent=2)
-        logger.info(f"Wrote JSON to {log_file}.")
+        logger.info(f"Wrote JSON --> {dump_json_to}")
+
     return result, dt
 
-def run_single_pipeline(input_file, output_folder='output', cache_folder='cached_audios', 
-                        audio_format='wav', model='base'):
-    base = Path(get_script_directory())
-    cache_folder_path = base / cache_folder
-    output_folder_path = base / output_folder
-    cache_folder_path.mkdir(parents=True, exist_ok=True)
-    output_folder_path.mkdir(parents=True, exist_ok=True)
 
-    input_type = util_general.get_media_type(input_file)
-    stem = Path(input_file).name
-    stem = Path(stem).stem  # remove one extension safely
+# --------------------------- Single Pipeline ----------------------------
 
-    working_file = input_file
-    if input_type == 'video':
-        working_file = str(cache_folder_path / f"{stem}_audio.{audio_format}")
-        video_to_audio(input_file, working_file, audio_format)
-        logger.info(f"Converted video to audio: {working_file}")
-    elif input_type == 'audio':
-        logger.info("Audio detected as input.")
-    else:
-        raise TypeError("Input file type unknown.")
 
-    raw_file_name = str(cache_folder_path / f"{stem}_raw.json")
-    result, elapsed_time = transcribe_audio(working_file, model, raw_file_name, word_timestamps=False)
+def run_single_pipeline(
+    input_file: Path,
+    *,
+    output_html_dir: Path = Path("artifacts/html"),
+    output_json_dir: Optional[Path] = Path("artifacts/json"),
+    logs_dir: Path = Path("artifacts/logs"),
+    model: str = "base",
+    audio_format: str = "wav",
+    keep_intermediate_audio: bool = False,
+    add_timestamp_to_name: bool = False,
+    overwrite: bool = True,
+    word_timestamps: bool = False,
+    language: Optional[str] = None,
+) -> Path:
+    """
+    Process one media file end-to-end:
+      - produce audio (temp, not persisted by default)
+      - transcribe with Whisper
+      - render HTML (util_html)
+      - optionally store raw JSON
 
-    output_file_name = str(output_folder_path / f"{stem}_output.html")
-    summary = {
-        "title": stem,
-        "model_name": model,
-        "elapsed_time": f"{elapsed_time:.2f} sec",
-        "created_date": get_time_as_string()
-    }
-    util_html.create_highlighted_html(result, output_file_name, summary, audio_src=working_file)
-    
-def run_batch_pipeline(input_folder, output_folder='output', cache_folder='cached_audios', audio_format='wav', model='base'):
-    logger.debug('Entering batch mode')
-    try:
-        # Ensure the directory exists
-        if not os.path.exists(input_folder):
-            raise Exception(f"Directory '{input_folder}' does not exist.")
+    Returns the path to the generated HTML.
+    """
+    input_file = Path(input_file)
+    if not input_file.exists():
+        raise FileNotFoundError(input_file)
 
-        # Ensure the given path is a directory
-        if not os.path.isdir(input_folder):
-            raise Exception(f"'{input_folder}' is not a directory.")
+    output_html_dir.mkdir(parents=True, exist_ok=True)
+    logs_dir.mkdir(parents=True, exist_ok=True)
+    if output_json_dir:
+        output_json_dir.mkdir(parents=True, exist_ok=True)
 
-        # Iterate through the directory and list all files
-        file_names = []
-        for entry in os.listdir(input_folder):
-            entry_path = os.path.join(input_folder, entry)
-            if os.path.isfile(entry_path):
-                file_names.append(entry_path)
+    stem = safe_stem(input_file)
+    if add_timestamp_to_name:
+        stem = f"{stem}_{now_tag()}"
 
-    except Exception as e:
-        logger.error(f"{e}")
-        return
+    html_stamp = time.strftime("%y%m%d_%H%M")
+    html_path = output_html_dir / f"{stem} ({html_stamp}).html"
+    if html_path.exists() and not overwrite:
+        raise FileExistsError(f"{html_path} exists (overwrite=False).")
 
-    for idx, file_name in enumerate(tqdm(file_names, desc='Processing')):
+    json_path = (output_json_dir / f"{stem}.json") if output_json_dir else None
+
+    with as_audio(
+        input_file, audio_format=audio_format, keep_intermediate=keep_intermediate_audio
+    ) as working_audio:
+        result, elapsed = transcribe_audio(
+            working_audio,
+            model_name=model,
+            dump_json_to=json_path,
+            word_timestamps=word_timestamps,
+            language=language,
+        )
+
+        summary = {
+            "title": safe_stem(input_file),
+            "model_name": model,
+            "elapsed_time": f"{elapsed:.2f} sec",
+            "created_date": now_tag(),
+        }
+        # pass audio_src so the player appears; it points at original audio (temp path works while file exists).
+        util_html.create_highlighted_html(
+            result, str(html_path), summary, audio_src=str(working_audio)
+        )
+
+    logger.info(f"HTML written --> {html_path}")
+    return html_path
+
+
+# ---------------------------- Batch Pipeline ----------------------------
+
+
+def discover_media(
+    input_dir: Path,
+    exts: Iterable[str] = (".wav", ".mp3", ".m4a", ".mp4", ".mov", ".mkv"),
+    recursive: bool = True,
+) -> list[Path]:
+    """
+    Return a sorted list of files with allowed extensions under input_dir.
+    """
+    input_dir = Path(input_dir)
+    if not input_dir.exists() or not input_dir.is_dir():
+        raise NotADirectoryError(input_dir)
+
+    paths = []
+    globber = input_dir.rglob if recursive else input_dir.glob
+    for ext in exts:
+        paths.extend(globber(f"*{ext}"))
+    return sorted(set(paths))
+
+
+def run_batch_pipeline(
+    input_dir: Path,
+    *,
+    output_html_dir: Path = Path("artifacts/html"),
+    output_json_dir: Optional[Path] = Path("artifacts/json"),
+    logs_dir: Path = Path("artifacts/logs"),
+    model: str = "base",
+    audio_format: str = "wav",
+    keep_intermediate_audio: bool = False,
+    add_timestamp_to_name: bool = False,
+    overwrite: bool = True,
+    word_timestamps: bool = False,
+    language: Optional[str] = None,
+    recursive: bool = True,
+) -> list[Path]:
+    """
+    Batch over a directory of media files. Returns list of generated HTML paths.
+    """
+    files = discover_media(Path(input_dir), recursive=recursive)
+    if not files:
+        logger.warning(f"No media files found in {input_dir}.")
+        return []
+
+    outputs: list[Path] = []
+    for i, f in enumerate(tqdm(files, desc="Transcribing")):
         try:
-            logger.info(f"Testing file #{idx+1}/{len(file_names)} from batch: {file_name}")
-            run_single_pipeline(file_name,output_folder=output_folder,cache_folder=cache_folder,audio_format=audio_format,model=model)
-        except TypeError:
-            continue
+            logger.info(f"[{i + 1}/{len(files)}] {f}")
+            out = run_single_pipeline(
+                f,
+                output_html_dir=output_html_dir,
+                output_json_dir=output_json_dir,
+                logs_dir=logs_dir,
+                model=model,
+                audio_format=audio_format,
+                keep_intermediate_audio=keep_intermediate_audio,
+                add_timestamp_to_name=add_timestamp_to_name,
+                overwrite=overwrite,
+                word_timestamps=word_timestamps,
+                language=language,
+            )
+            outputs.append(out)
+        except Exception as e:
+            logger.error(f"Failed on {f}: {e}")
+    return outputs
 
-if __name__=='__main__':
-    configure_logging()
-    logger = logging.getLogger()
-    logger.info('Whisper pipeline starting')
-    logger.info('=========================')
 
-    # run_batch_pipeline('batch_test',model='medium') # Enter your folder name here, or try `run_single_pipeline`
-    run_single_pipeline('input_test/intro_29s.wav', model='medium', audio_format='mp3')
+# --------------------------------- Main ---------------------------------
 
-    logger.info('Pipeline ends successfully\n')
+if __name__ == "__main__":
+    configure_logging()  # logs --> artifacts/logs/whisper.log
+    logger.info("Whisper pipeline starting")
+    logger.info("=========================")
+
+    # EXAMPLE: single file
+    run_single_pipeline(
+        Path("data/test/en_27m_lec241212.m4a"),
+        model="medium",
+        audio_format="mp3",
+        keep_intermediate_audio=False,  # don't store converted audio
+        output_html_dir=Path("artifacts/html"),
+        output_json_dir=Path("artifacts/json"),  # or None to disable JSON dumps
+        overwrite=True,
+    )
+
+    # EXAMPLE: batch
+    # run_batch_pipeline(
+    #     Path("data/test/en_27m_lec241212.m4a"),
+    #     model="base",
+    #     audio_format="wav",
+    #     recursive=True,
+    # )
+
+    logger.info("Pipeline ends successfully\n")
